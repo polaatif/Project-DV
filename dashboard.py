@@ -8,10 +8,12 @@ import plotly.express as px
 import plotly.graph_objects as go
 from dash import Dash, Input, Output, callback, dcc, html
 
+
+
 # ── Paths & constants ─────────────────────────────────────────────────────────
 BASE_DIR   = Path(__file__).resolve().parent
-DATA_CLEAN  = BASE_DIR / "data" / "cleaned_data.csv"
-DATA_SAMPLE = BASE_DIR / "data" / "sample_cleaned_data.csv"
+DATA_CLEAN  = BASE_DIR /"data" /"cleaned_data.csv"
+DATA_SAMPLE = BASE_DIR  / "data" /"sample_cleaned_data.csv"
 
 USECOLS = [
     "short_name", "age", "nationality_name", "overall",
@@ -295,9 +297,27 @@ tab_distribution = html.Div([
 tab_timeseries = html.Div([
     _filter_panel("ts"),
     html.Div([
-        _chart_card("ts-line", "Age Rating Trend", "blue"),
-        _chart_card("ts-area", "Player Distribution", "green"),
+        html.Label("Time Series Options", className="ctrl-label"),
+        dcc.RadioItems(
+            id="ts-ma-type",
+            options=[
+                {"label": "Raw Data Only", "value": "raw"},
+                {"label": "With 5-Age Moving Average", "value": "ma5"},
+                {"label": "With 10-Age Moving Average", "value": "ma10"},
+                {"label": "Both MA (5 & 10)", "value": "both_ma"},
+            ],
+            value="ma5", inline=True,
+            inputStyle={"marginRight": "4px"},
+            style={"marginTop": "6px"},
+        ),
+    ], style={"flex": "1 1 360px", "paddingTop": "8px"}, className="ctrl-bar"),
+    html.Div([
+        _chart_card("ts-line", "Rating Trend Over Age (Ordered X-axis)", "blue"),
+        _chart_card("ts-area", "Player Distribution Over Age (Volume)", "green"),
     ], className="chart-row"),
+    html.Div([
+        _chart_card("ts-stacked-area", "Multi-Position Volume Trend", "purple"),
+    ], className="chart-row chart-row-single"),
 ])
 
 
@@ -354,7 +374,7 @@ app.layout = html.Div([
                                     "fontWeight": "700", "color": "#07111c"}),
             dcc.Tab(label="Time Series", value="tab-ts",
                     children=tab_timeseries,
-                    selected_style={"borderTop": "3px solid #2cff8f",
+                    selected_style={"borderTop": "3px solid #a855f7",
                                     "fontWeight": "700", "color": "#07111c"}),
         ],
         className="tabs-shell",
@@ -758,6 +778,7 @@ def update_distribution(position, metric):
 
 
 # ── Tab 4 — Time Series ───────────────────────────────────────────────────────
+# ── Tab 4 — Time Series ───────────────────────────────────────────────────────
 @callback(
     Output("ts-fval",  "options"),
     Output("ts-fval",  "value"),
@@ -775,44 +796,192 @@ def ts_options(ftype):
 @callback(
     Output("ts-line", "figure"),
     Output("ts-area", "figure"),
+    Output("ts-stacked-area", "figure"),
     Input("ts-ftype", "value"),
     Input("ts-fval",  "value"),
     Input("ts-age",   "value"),
+    Input("ts-ma-type", "value"),
 )
-def update_timeseries(ftype, fval, age_range):
+def update_timeseries(ftype, fval, age_range, ma_type):
+    """
+    RULE 1: x-axis is ordered (age)
+    RULE 2: Time series use continuous sequence
+    RULE 3: Area charts MUST start at 0
+    RULE 4: Missing data uses NaN (line breaks honestly)
+    RULE 5: Moving averages remove noise and reveal trend
+    RULE 6: Line charts do NOT need zero baseline (lines use POSITION, not AREA)
+    """
     age_lo, age_hi = (AGE_MIN, AGE_MAX) if not age_range else (int(age_range[0]), int(age_range[1]))
     sub = _filter_df(DF, ftype, fval, age_lo, age_hi)
 
     if sub.empty:
         e = _empty("No data — widen the age range or select All.")
-        return e, e
+        return e, e, e
 
+    # ────────────────────────────────────────────────────────────────────────
+    # LINE CHART — Mean Overall Rating by Age
+    # ────────────────────────────────────────────────────────────────────────
+    # RULE: Ordered x-axis (age), trend is the focus
     trend = sub.groupby("age", as_index=False)["overall"].mean().sort_values("age")
-    line_fig = px.line(
-        trend, x="age", y="overall", markers=True,
-        title="Line — Mean Overall Rating by Age",
-        labels={"age": "Age", "overall": "Mean Overall Rating"},
-        template=TEMPLATE, height=H,
-    )
-    line_fig.update_traces(line=dict(width=3))
+    
+    # RULE: Moving averages reveal hidden trends
+    # Window 5: removes tiny spikes, follows data closely
+    # Window 10: shows medium-term trend
+    trend["ma_5"] = trend["overall"].rolling(
+        window=5, center=True, min_periods=1
+    ).mean()
+    trend["ma_10"] = trend["overall"].rolling(
+        window=10, center=True, min_periods=1
+    ).mean()
+    
+    # RULE: Missing data breaks the line using NaN
+    # (age sequence might have gaps if no players at certain ages)
+    all_ages = pd.Series(range(int(trend["age"].min()), int(trend["age"].max()) + 1), name="age")
+    trend = all_ages.to_frame().merge(trend, on="age", how="left")
+    # Now trend has NaN for missing ages, which Plotly will handle properly
+    
+    line_fig = go.Figure()
+    
+    # RULE: Raw line is faint (alpha ≈ 0.3, thin)
+    line_fig.add_trace(go.Scatter(
+        x=trend["age"],
+        y=trend["overall"],
+        mode="lines+markers",
+        name="Raw Data",
+        line=dict(color="#636efa", width=1.5),
+        marker=dict(size=4, color="#636efa"),
+        opacity=0.4,  # Faint raw data
+        hovertemplate="<b>Age %{x}</b><br>Mean Rating: %{y:.2f}<extra></extra>",
+    ))
+    
+    # RULE: Moving average is thicker and clearer
+    if ma_type in ["ma5", "both_ma"]:
+        line_fig.add_trace(go.Scatter(
+            x=trend["age"],
+            y=trend["ma_5"],
+            mode="lines",
+            name="5-Age MA",
+            line=dict(color="#f97316", width=3),  # Orange, thick
+            hovertemplate="<b>Age %{x}</b><br>5-Age MA: %{y:.2f}<extra></extra>",
+        ))
+    
+    if ma_type in ["ma10", "both_ma"]:
+        line_fig.add_trace(go.Scatter(
+            x=trend["age"],
+            y=trend["ma_10"],
+            mode="lines",
+            name="10-Age MA",
+            line=dict(color="#ef4444", width=3),  # Red, thick
+            hovertemplate="<b>Age %{x}</b><br>10-Age MA: %{y:.2f}<extra></extra>",
+        ))
+    
+    # RULE: Line charts do NOT need zero baseline
+    # (they use position not area; we zoom into variations)
     line_fig.update_layout(
+        title="<b>Line Chart — Mean Overall Rating by Age</b><br><sub>Ordered continuous x-axis | Trend focus | Moving averages reveal pattern</sub>",
+        xaxis_title="Age (Ordered Sequence)",
+        yaxis_title="Mean Overall Rating (0–100)",
+        template=TEMPLATE,
+        height=H,
         hovermode="x unified",
-        xaxis_title="Age", yaxis_title="Mean Overall Rating",
+        legend=dict(
+            x=0.02, y=0.98, xanchor="left", yanchor="top",
+            bgcolor="rgba(255,255,255,0.8)", bordercolor="black", borderwidth=1,
+        ),
+        plot_bgcolor="white", paper_bgcolor="white",
     )
-
+    
+    # ────────────────────────────────────────────────────────────────────────
+    # AREA CHART — Player Count by Age
+    # ────────────────────────────────────────────────────────────────────────
+    # RULE: Area charts show TOTAL VOLUME and MAGNITUDE
+    # RULE: y-axis MUST start at 0 (area represents magnitude)
     counts = sub.groupby("age").size().reset_index(name="players").sort_values("age")
-    area_fig = px.area(
-        counts, x="age", y="players",
-        title="Area — Player Count Distribution by Age",
-        labels={"age": "Age", "players": "Player Count"},
-        template=TEMPLATE, height=H,
-    )
-    area_fig.update_traces(line_color="#636efa", fillcolor="rgba(99,110,250,0.35)")
+    
+    # Add missing ages with NaN (line breaks honestly, no fake interpolation)
+    counts = all_ages.to_frame().merge(counts, on="age", how="left")
+    
+    area_fig = go.Figure()
+    
+    # RULE: Use transparency alpha (0.3–0.8)
+    # RULE: y-axis starts at 0 (height and shaded area encode value)
+    area_fig.add_trace(go.Scatter(
+        x=counts["age"],
+        y=counts["players"],
+        fill="tozeroy",  # Fill from 0
+        name="Players per Age",
+        line=dict(color="#16b34a", width=2.5),
+        fillcolor="rgba(22, 179, 74, 0.4)",  # Green with alpha ≈ 0.4
+        hovertemplate="<b>Age %{x}</b><br>Players: %{y}<extra></extra>",
+    ))
+    
     area_fig.update_layout(
-        xaxis_title="Age", yaxis_title="Player Count",
+        title="<b>Area Chart — Player Count Distribution by Age</b><br><sub>Y-axis starts at 0 | Filled area = total volume/magnitude</sub>",
+        xaxis_title="Age (Ordered Sequence)",
+        yaxis_title="Number of Players",
+        yaxis=dict(
+            zeroline=True, zerolinewidth=2, zerolinecolor="lightgray",
+            range=[0, None],  # RULE: Start at 0
+        ),
+        template=TEMPLATE,
+        height=H,
+        hovermode="x unified",
+        plot_bgcolor="white", paper_bgcolor="white",
     )
+    
+    # ────────────────────────────────────────────────────────────────────────
+    # STACKED AREA CHART — Position Composition by Age
+    # ────────────────────────────────────────────────────────────────────────
+    # RULE: Stacked area for composition over time
+    # RULE: Each layer = category contribution, total height = total quantity
+    position_age = sub.groupby(["age", "position_group"]).size().reset_index(name="count")
+    position_age = position_age.sort_values(["age", "position_group"])
+    
+    stacked_fig = go.Figure()
+    
+    # Define colors for positions
+    pos_colors = {
+        "Goalkeeper": "#1f77b4",  # Blue
+        "Defender": "#ff7f0e",    # Orange
+        "Midfielder": "#2ca02c",  # Green
+        "Forward": "#d62728",     # Red
+    }
+    
+    # Add trace for each position
+    for position in sorted(position_age["position_group"].unique()):
+        pos_data = position_age[position_age["position_group"] == position]
+        pos_data = all_ages.to_frame().merge(pos_data, on="age", how="left")
+        
+        stacked_fig.add_trace(go.Scatter(
+            x=pos_data["age"],
+            y=pos_data["count"],
+            stackgroup="one",
+            name=position,
+            line=dict(width=0.5, color=pos_colors.get(position, "#000")),
+            fillcolor=pos_colors.get(position, "#000"),
+            hovertemplate="<b>Age %{x}</b><br>" + position + ": %{y} players<extra></extra>",
+        ))
+    
+    stacked_fig.update_layout(
+        title="<b>Stacked Area Chart — Position Composition by Age</b><br><sub>Shows category contribution over time | Y-axis starts at 0 | Max 3–5 categories</sub>",
+        xaxis_title="Age (Ordered Sequence)",
+        yaxis_title="Number of Players by Position",
+        yaxis=dict(
+            zeroline=True, zerolinewidth=2, zerolinecolor="lightgray",
+            range=[0, None],  # RULE: Start at 0
+        ),
+        template=TEMPLATE,
+        height=H,
+        hovermode="x unified",
+        legend=dict(
+            x=0.98, y=0.98, xanchor="right", yanchor="top",
+            bgcolor="rgba(255,255,255,0.8)", bordercolor="black", borderwidth=1,
+        ),
+        plot_bgcolor="white", paper_bgcolor="white",
+    )
+    
+    return line_fig, area_fig, stacked_fig
 
-    return line_fig, area_fig
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
